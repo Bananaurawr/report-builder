@@ -1,6 +1,5 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { callable, routeAgentRequest, type Schedule } from "agents";
-import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
+import { callable, routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   convertToModelMessages,
@@ -71,15 +70,38 @@ export class ChatAgent extends AIChatAgent<Env> {
     
     const result = streamText({
       model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-      system: `You are an academic report assistant. You help students write structured academic reports.
-        You work in 3 stages:
-        1. GATHER: Ask the user for topic, report type, language (English or Türkçe), length, and any special requirements. Ask one question at a time.
-        2. OUTLINE: Once you have enough info, generate a structured outline with section titles and brief descriptions. Ask the user to confirm or edit it.
-        3. WRITE: Write each section one by one. After each section, wait for user feedback before continuing.
+      system: `You are a friendly academic report assistant helping students write structured reports.
 
-        Always track which stage you are in. Current stage is stored in context.`,
-        
-        // Prune old tool calls to save tokens on long conversations
+      IMPORTANT: Always be helpful and conversational. Never say "input is not sufficient". Instead, ask a follow-up question to get what you need.
+
+      Start every new conversation by greeting the user warmly and asking what topic they want to write about.
+
+      You work in 3 stages:
+
+      STAGE 1 - GATHER:
+      Ask ONE question at a time in this order:
+      - What is the report topic?
+      - What type of report? (research paper, project report, lab report, etc.)
+      - What language? (English or Türkçe)
+      - How long should it be?
+      - Any special requirements?
+      Call setStage("gather") when starting this stage.
+
+      STAGE 2 - OUTLINE:
+      Once all info is gathered, generate a structured outline with section titles and descriptions.
+      Ask the user to confirm or edit it.
+      Call saveOutline() with the confirmed outline.
+      Call setStage("outline") when starting this stage.
+
+      STAGE 3 - WRITE:
+      Write each section one by one.
+      After each section ask: "Shall I continue to the next section?"
+      Call saveSection() after each section is written.
+      Call setStage("write") when starting this stage.
+
+      Call getReportState() at the start of each message to know which stage you are in.`,
+            
+      // Prune old tool calls to save tokens on long conversations
       messages: pruneMessages({
         messages: inlineDataUrls(await convertToModelMessages(this.messages)),
         toolCalls: "before-last-2-messages"
@@ -147,60 +169,12 @@ export class ChatAgent extends AIChatAgent<Env> {
             return { stage, outline, completedSections };
           }
         }),
-
-        // Approval tool: requires user confirmation before executing
-        calculate: tool({
-          description:
-            "Perform a math calculation with two numbers. Requires user approval for large numbers.",
-          inputSchema: z.object({
-            a: z.number().describe("First number"),
-            b: z.number().describe("Second number"),
-            operator: z
-              .enum(["+", "-", "*", "/", "%"])
-              .describe("Arithmetic operator")
-          }),
-          needsApproval: async ({ a, b }) =>
-            Math.abs(a) > 1000 || Math.abs(b) > 1000,
-          execute: async ({ a, b, operator }) => {
-            const ops: Record<string, (x: number, y: number) => number> = {
-              "+": (x, y) => x + y,
-              "-": (x, y) => x - y,
-              "*": (x, y) => x * y,
-              "/": (x, y) => x / y,
-              "%": (x, y) => x % y
-            };
-            if (operator === "/" && b === 0) {
-              return { error: "Division by zero" };
-            }
-            return {
-              expression: `${a} ${operator} ${b}`,
-              result: ops[operator](a, b)
-            };
-          }
-        })
       },
       stopWhen: stepCountIs(5),
       abortSignal: options?.abortSignal
     });
 
     return result.toUIMessageStreamResponse();
-  }
-
-  async executeTask(description: string, _task: Schedule<string>) {
-    // Do the actual work here (send email, call API, etc.)
-    console.log(`Executing scheduled task: ${description}`);
-
-    // Notify connected clients via a broadcast event.
-    // We use broadcast() instead of saveMessages() to avoid injecting
-    // into chat history — that would cause the AI to see the notification
-    // as new context and potentially loop.
-    this.broadcast(
-      JSON.stringify({
-        type: "scheduled-task",
-        description,
-        timestamp: new Date().toISOString()
-      })
-    );
   }
 }
 

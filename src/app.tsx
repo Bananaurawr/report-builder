@@ -449,7 +449,7 @@ function Chat() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
-              <span className="mr-2">⛅</span>Agent Starter
+              <span className="mr-2">📄</span>Report Builder
             </h1>
             <Badge variant="secondary">
               <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
@@ -663,10 +663,10 @@ function Chat() {
               contents={
                 <div className="flex flex-wrap justify-center gap-2">
                   {[
-                    "What's the weather in Paris?",
-                    "What timezone am I in?",
-                    "Calculate 5000 * 3",
-                    "Remind me in 5 minutes to take a break"
+                    "I want to write a report for my website project",
+                    "Fizik laboratuvarı ders için bir rapor hazırlanabilir misiniz",
+                    "I need a research report on renewable energy",
+                    "I want you to format my report please"
                   ].map((prompt) => (
                     <Button
                       key={prompt}
