@@ -68,17 +68,18 @@ export class ChatAgent extends AIChatAgent<Env> {
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
-
+    
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
-        sessionAffinity: this.sessionAffinity
-      }),
-      system: `You are a helpful assistant that can understand images. You can check the weather, get the user's timezone, run calculations, and schedule tasks. When users share images, describe what you see and answer questions about them.
+      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+      system: `You are an academic report assistant. You help students write structured academic reports.
+        You work in 3 stages:
+        1. GATHER: Ask the user for topic, report type, language (English or Türkçe), length, and any special requirements. Ask one question at a time.
+        2. OUTLINE: Once you have enough info, generate a structured outline with section titles and brief descriptions. Ask the user to confirm or edit it.
+        3. WRITE: Write each section one by one. After each section, wait for user feedback before continuing.
 
-${getSchedulePrompt({ date: new Date() })}
-
-If the user asks to schedule a task, use the schedule tool to schedule the task.`,
-      // Prune old tool calls to save tokens on long conversations
+        Always track which stage you are in. Current stage is stored in context.`,
+        
+        // Prune old tool calls to save tokens on long conversations
       messages: pruneMessages({
         messages: inlineDataUrls(await convertToModelMessages(this.messages)),
         toolCalls: "before-last-2-messages"
@@ -87,31 +88,64 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
         // MCP tools from connected servers
         ...mcpTools,
 
-        // Server-side tool: runs automatically on the server
-        getWeather: tool({
-          description: "Get the current weather for a city",
+        // Tool to check which stage the workflow is in
+        setStage: tool({
+          description: "Set the current stage of the report writing process.",
           inputSchema: z.object({
-            city: z.string().describe("City name")
+            stage: z.enum(["gather", "outline", "write"]).describe("Current stage"),
+            completedSections: z.array(z.string()).describe("List of completed sections (for write stage)").optional()
           }),
-          execute: async ({ city }) => {
-            // Replace with a real weather API in production
-            const conditions = ["sunny", "cloudy", "rainy", "snowy"];
-            const temp = Math.floor(Math.random() * 30) + 5;
-            return {
-              city,
-              temperature: temp,
-              condition:
-                conditions[Math.floor(Math.random() * conditions.length)],
-              unit: "celsius"
-            };
+          execute: async ({ stage, completedSections }) => {
+            // Save to Durable Object Storage for access in future messages
+            await this.ctx.storage.put("stage", stage);
+            if (completedSections) {
+              await this.ctx.storage.put("completedSections", completedSections);
+            }
+            return { stage };
           }
         }),
 
-        // Client-side tool: no execute function — the browser handles it
-        getUserTimezone: tool({
-          description:
-            "Get the user's timezone from their browser. Use this when you need to know the user's local time.",
-          inputSchema: z.object({})
+        // Save the confirmed outline to storage so it can be referenced during the write stage
+        saveOutline: tool({
+          description: "Save the confirmed report outline for later reference.",
+          inputSchema: z.object({
+            title:z.string(),
+            sections: z.array(z.object({
+              id: z.string(),
+              title: z.string(),
+              description: z.string()
+            }))
+          }),
+          execute: async ({ title, sections }) => {
+            await this.ctx.storage.put("outline", { title, sections });
+            return {saved:true, sectionCount:sections.length};
+          }
+        }),
+
+        // Save a completed section
+        saveSection: tool({
+          description: "Save a written section to storage",
+          inputSchema: z.object({
+            sectionId: z.string(),
+            title: z.string(),
+            content: z.string()
+          }),
+          execute: async ({ sectionId, title, content }) => {
+            await this.ctx.storage.put(`section:${sectionId}`, { title, content });
+            return { saved: true };
+          }
+        }),
+
+        // Get current report stage
+        getReportState: tool({
+          description: "Get the current stage, outline, and written sections",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const stage = await this.ctx.storage.get("stage") ?? "gather";
+            const outline = await this.ctx.storage.get("outline") ?? null;
+            const completedSections = await this.ctx.storage.get("completedSections") ?? [];
+            return { stage, outline, completedSections };
+          }
         }),
 
         // Approval tool: requires user confirmation before executing
@@ -142,58 +176,6 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
               expression: `${a} ${operator} ${b}`,
               result: ops[operator](a, b)
             };
-          }
-        }),
-
-        scheduleTask: tool({
-          description:
-            "Schedule a task to be executed at a later time. Use this when the user asks to be reminded or wants something done later.",
-          inputSchema: scheduleSchema,
-          execute: async ({ when, description }) => {
-            if (when.type === "no-schedule") {
-              return "Not a valid schedule input";
-            }
-            const input =
-              when.type === "scheduled"
-                ? when.date
-                : when.type === "delayed"
-                  ? when.delayInSeconds
-                  : when.type === "cron"
-                    ? when.cron
-                    : null;
-            if (!input) return "Invalid schedule type";
-            try {
-              this.schedule(input, "executeTask", description, {
-                idempotent: true
-              });
-              return `Task scheduled: "${description}" (${when.type}: ${input})`;
-            } catch (error) {
-              return `Error scheduling task: ${error}`;
-            }
-          }
-        }),
-
-        getScheduledTasks: tool({
-          description: "List all tasks that have been scheduled",
-          inputSchema: z.object({}),
-          execute: async () => {
-            const tasks = this.getSchedules();
-            return tasks.length > 0 ? tasks : "No scheduled tasks found.";
-          }
-        }),
-
-        cancelScheduledTask: tool({
-          description: "Cancel a scheduled task by its ID",
-          inputSchema: z.object({
-            taskId: z.string().describe("The ID of the task to cancel")
-          }),
-          execute: async ({ taskId }) => {
-            try {
-              this.cancelSchedule(taskId);
-              return `Task ${taskId} cancelled.`;
-            } catch (error) {
-              return `Error cancelling task: ${error}`;
-            }
           }
         })
       },
